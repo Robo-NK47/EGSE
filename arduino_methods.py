@@ -1,60 +1,62 @@
-from serial import Serial
-import socket
-import socket_methods
-import struct
+import serial
 
 
-def get_data_from_arduino():
+def check_which_port():
+    import serial.tools.list_ports
+    ports = list(serial.tools.list_ports.comports())
+    ports_list = []
+    for p in ports:
+        ports_list.append(p)
+    return ports_list
+
+
+def get_arduino_ports():
+    ports = check_which_port()
+    arduino_devices = []
+    for p in ports:
+        if 'ttyACM' in p.description:
+            arduino_devices.append(p.device)
+    if len(arduino_devices) > 0:
+        return arduino_devices
+    return None
+
+
+def get_data_from_arduino(arduino):
     while True:
         if arduino.inWaiting() > 0:
-            current_data = arduino.read(4)
-            return struct.unpack('<f', current_data)[0]
+            try:
+                line = arduino.readline().decode()
+                try:
+                    return int(line)
+                except ValueError:
+                    pass
+            except UnicodeDecodeError:
+                pass
 
 
-def read_all_analog_signals():
-    analog_sensors = {'strain_gages': 2.0, 'thermistors': 3.0}
-    for sensor in analog_sensors:
-        while not get_data_from_arduino() == analog_sensors[sensor]:
-            pass
-        _sensor = []
-        for _ in range(8):
-            _sensor.append(get_data_from_arduino())
-        analog_sensors[sensor] = _sensor
-
-    return analog_sensors
+def get_all_analog_values(arduino, _header_value):
+    header = get_data_from_arduino(arduino)
+    while header != _header_value:
+        header = get_data_from_arduino(arduino)
+        pass
+    analog_values = {'header': header}
+    for sensor_number in range(16):
+        analog_values[sensor_number] = get_data_from_arduino(arduino)
+    return analog_values
 
 
-def create_reliable_connection(_com, _baud_rate):
-    global arduino
-    large_counter = 1
+def generate_arduinos(baud_rate=115200, header_value=1024):
+    _arduinos = {}
+    for i, arduino_port in enumerate(get_arduino_ports()):
+        _arduinos[f'arduino {i}'] = serial.Serial(arduino_port, baud_rate)
+
+    return _arduinos, header_value
+
+
+if __name__ == "main":
+    arduinos, header = generate_arduinos()
     while True:
-        arduino = Serial(_com, _baud_rate)
-        counter = 0
-        while counter < 100:
-            data = get_data_from_arduino()
-            if data == 2.0:
-                print(f'Successful connection after {large_counter} attempts.')
-                return arduino
-            counter += 1
-        large_counter += 1
-
-
-arduino_COM = '/dev/ttyACM0'
-baud_rate = 115200
-arduino = create_reliable_connection(arduino_COM, baud_rate)
-
-
-if __name__ == '__main__':
-    header_size = 10
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    host = socket.gethostname()
-    print(f'\n\nEnter "{host}" in the host variable in the client side.')
-    sock.bind((host, 1243))
-    sock.listen(5)
-
-    print('Waiting for client.')
-    client_socket, address = sock.accept()
-
-    while True:
-        socket_methods.talk(client_socket, read_all_analog_signals())
-        print(read_all_analog_signals())
+        for arduino in arduinos:
+            value = get_all_analog_values(arduinos[arduino], header)
+            print(f'{arduino} - {value}')
+        print("")
