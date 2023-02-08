@@ -2,6 +2,7 @@ import RPi.GPIO as GPIO
 import time
 from varname import nameof
 import arduino_methods
+from tqdm.auto import tqdm
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
@@ -269,8 +270,7 @@ class EGSE:
         exit()
 
 
-egse = EGSE({'arm1': {"arduino": 0,
-                      "limit_switches": {'limit_switch_1': 3, 'limit_switch_2': 5, 'limit_switch_3': 7},
+egse = EGSE({'arm1': {"limit_switches": {'limit_switch_1': 3, 'limit_switch_2': 5, 'limit_switch_3': 7},
                       "hdrms": {'hdrm_1': 8},
                       "motor": {'motor_direction': 10, 'motor_step': 11},
                       "strain_gages": {'strain_gage_1': {'arduino': 0, 'pin': 0},
@@ -280,8 +280,7 @@ egse = EGSE({'arm1': {"arduino": 0,
                                       'thermistor_2': {'arduino': 0, 'pin': 4},
                                       'thermistor_3': {'arduino': 0, 'pin': 5}}},
 
-             'arm2': {"arduino": 0,
-                      "limit_switches": {'limit_switch_1': 12, 'limit_switch_2': 13, 'limit_switch_3': 15},
+             'arm2': {"limit_switches": {'limit_switch_1': 12, 'limit_switch_2': 13, 'limit_switch_3': 15},
                       "hdrms": {'hdrm_1': 16},
                       "motor": {'motor_direction': 18, 'motor_step': 19},
                       "strain_gages": {'strain_gage_1': {'arduino': 0, 'pin': 6},
@@ -291,8 +290,7 @@ egse = EGSE({'arm1': {"arduino": 0,
                                       'thermistor_2': {'arduino': 0, 'pin': 10},
                                       'thermistor_3': {'arduino': 0, 'pin': 11}}},
 
-             'arm3': {"arduino": 1,
-                      "limit_switches": {'limit_switch_1': 21, 'limit_switch_2': 22, 'limit_switch_3': 23},
+             'arm3': {"limit_switches": {'limit_switch_1': 21, 'limit_switch_2': 22, 'limit_switch_3': 23},
                       "hdrms": {'hdrm_1': 24},
                       "motor": {'motor_direction': 26, 'motor_step': 27},
                       "strain_gages": {'strain_gage_1': {'arduino': 1, 'pin': 0},
@@ -302,8 +300,7 @@ egse = EGSE({'arm1': {"arduino": 0,
                                       'thermistor_2': {'arduino': 1, 'pin': 4},
                                       'thermistor_3': {'arduino': 1, 'pin': 5}}},
 
-             'arm4': {"arduino": 1,
-                      "limit_switches": {'limit_switch_1': 28, 'limit_switch_2': 29, 'limit_switch_3': 31},
+             'arm4': {"limit_switches": {'limit_switch_1': 28, 'limit_switch_2': 29, 'limit_switch_3': 31},
                       "hdrms": {'hdrm_1': 32},
                       "motor": {'motor_direction': 33, 'motor_step': 35},
                       "strain_gages": {'strain_gage_1': {'arduino': 1, 'pin': 6},
@@ -313,11 +310,16 @@ egse = EGSE({'arm1': {"arduino": 0,
                                       'thermistor_2': {'arduino': 1, 'pin': 10},
                                       'thermistor_3': {'arduino': 1, 'pin': 11}}},
              })
-arm1_state = egse.arm1.get_arm_state()
-for sensor_group in arm1_state:
-    print(f'\n{sensor_group}:')
-    for sensor in arm1_state[sensor_group]:
-        space = [' ' for i in range(len(sensor_group) + 2)]
-        print(f'{"".join(space)}{sensor}: {arm1_state[sensor_group][sensor]}')
+
+for _ in tqdm(range(10000000)):
+    arm1_state = egse.arm1.get_arm_state()
+    arm2_state = egse.arm2.get_arm_state()
+    arm3_state = egse.arm3.get_arm_state()
+    arm4_state = egse.arm4.get_arm_state()
+    # for sensor_group in arm1_state:
+    #     # print(f'\n{sensor_group}:')
+    #     for sensor in arm1_state[sensor_group]:
+    #         space = [' ' for i in range(len(sensor_group) + 2)]
+    #         # print(f'{"".join(space)}{sensor}: {arm1_state[sensor_group][sensor]}')
 
 print('1')
