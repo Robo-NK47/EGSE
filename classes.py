@@ -1,14 +1,24 @@
 import RPi.GPIO as GPIO
 import time
-from varname import nameof
-import arduino_methods
+import arduino_methods_USB
+from tqdm.auto import tqdm
+from pcf8575 import PCF8575
+
+
+def setup_mcp(pcf_address):
+    i2c_port_num = 1
+    pcf = PCF8575(i2c_port_num, pcf_address)
+
+    return pcf
+
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 # The physical pin number is the key, the gpio number is the value
 pin_to_gpio = {3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18, 13: 27, 15: 22, 16: 23, 18: 24, 19: 10, 21: 9, 22: 25,
                23: 11, 24: 8, 26: 7, 27: 0, 28: 1, 29: 5, 31: 6, 32: 12, 33: 13, 35: 19, 36: 16, 37: 26, 38: 20, 40: 21}
-arduinos, header = arduino_methods.generate_arduinos()
+arduinos, header = arduino_methods_USB.generate_arduinos()
+mcps = {0: setup_mcp(0x20), 1: setup_mcp(0x21)}
 
 
 class Motor:
@@ -123,7 +133,7 @@ class AnalogSensor:
         self.transform_function = transform_function
 
     def transform(self, analog_data):
-        #return self.transform_function(analog_data)
+        # return self.transform_function(analog_data)
         return analog_data
 
     def read_sensor(self, analog_data):
@@ -141,6 +151,21 @@ class DigitalSensor:
 
     def check_state(self):
         self.state = GPIO.input(pin_to_gpio[self.sensor_pin])
+        return self.state
+
+
+class Relay:
+    def __init__(self, mcp_pin, mcp_number):
+        self.mcp_pin = mcp_pin
+        self.mcp_number = mcp_number
+        self.state = self.check_state()
+
+    def change_state(self, new_state):
+        mcps[self.mcp_number].port[self.mcp_pin] = new_state
+        return self.state
+
+    def check_state(self):
+        self.state = mcps[self.mcp_number].port[self.mcp_pin]
         return self.state
 
 
@@ -176,11 +201,25 @@ class DigitalSensorsGroup:
         return states
 
 
+class RelayGroup:
+    def __init__(self, **kwargs):
+        self.number_of_relays = len(kwargs.keys())
+        self.relay_names = list(kwargs.keys())
+        for attr in kwargs.keys():
+            self.__dict__[attr] = Relay(mcp_pin=kwargs[attr]['pin'], mcp_number=kwargs[attr]['mcp'])
+
+    def get_values(self):
+        states = {}
+        for relay_name in self.relay_names:
+            states[relay_name] = self.__dict__[relay_name].check_state()
+        return states
+
+
 class Arm:
     def __init__(self, limit_switches_kwargs, motor_name, motor_direction_pin,
                  motor_step_pin, motor_direction, motor_step_resolution, strain_gages_kwargs,
                  strain_gage_transform_function, thermistors_kwargs,
-                 thermistor_transform_function, hdrm_pin_kwargs, arduino):
+                 thermistor_transform_function, relays_kwargs, arduino):
         self.limit_switches = DigitalSensorsGroup(sensor_type='limit switch', **limit_switches_kwargs)
         self.motor = Motor(motor_name=motor_name, direction_pin=motor_direction_pin, step_pin=motor_step_pin,
                            limit_switches=self.limit_switches, direction=motor_direction,
@@ -191,7 +230,7 @@ class Arm:
         self.thermistors = AnalogSensorsGroup(sensor_type='thermistors',
                                               transform_function=thermistor_transform_function,
                                               **thermistors_kwargs)
-        self.hdrm = DigitalSensorsGroup(sensor_type='hdrm', **hdrm_pin_kwargs)
+        self.relays = RelayGroup(**relays_kwargs)
         self.arduino = arduino
 
     def get_arm_state(self):
@@ -200,16 +239,16 @@ class Arm:
                 'motor': self.motor.get_values(),
                 'strain_gages': self.strain_gages.get_values(arduino_data),
                 'thermistors': self.thermistors.get_values(arduino_data),
-                'hdrm': self.hdrm.get_values()}
+                'relays': self.relays.get_values()}
 
     def get_analog_data(self):
-        return arduino_methods.get_all_analog_values(arduinos[f'arduino {self.arduino}'], header)
+        return arduino_methods_USB.get_all_analog_values(arduinos[f'arduino {self.arduino}'], header)
 
 
 class EGSE:
     def __init__(self, arms_meta_data):
         self.arms_meta_data = arms_meta_data
-        self.digital_pins = {3: 'free', 5: 'free', 7: 'free', 8: 'free', 10: 'free', 11: 'free', 12: 'free',
+        self.digital_pins = {3: 'I2C', 5: 'I2C', 7: 'free', 8: 'free', 10: 'free', 11: 'free', 12: 'free',
                              13: 'free', 15: 'free', 16: 'free', 18: 'free', 19: 'free', 21: 'free', 22: 'free',
                              23: 'free', 24: 'free', 26: 'free', 27: 'free', 28: 'free', 29: 'free', 31: 'free',
                              32: 'free', 33: 'free', 35: 'free', 36: 'free', 37: 'free', 38: 'free', 40: 'free'}
@@ -218,16 +257,21 @@ class EGSE:
                                           13: 'free', 14: 'free', 15: 'free'},
                             'arduino_1': {0: 'free', 1: 'free', 2: 'free', 3: 'free', 4: 'free', 5: 'free', 6: 'free',
                                           7: 'free', 8: 'free', 9: 'free', 10: 'free', 11: 'free', 12: 'free',
-                                          13: 'free', 14: 'free', 15: 'free'}
-                            }
+                                          13: 'free', 14: 'free', 15: 'free'}}
+        self.relay_pins = {'mcp_0': {0: 'free', 1: 'free', 2: 'free', 3: 'free', 4: 'free', 5: 'free', 6: 'free',
+                                     7: 'free', 8: 'free', 9: 'free', 10: 'free', 11: 'free', 12: 'free',
+                                     13: 'free', 14: 'free', 15: 'free'},
+                           'mcp_1': {0: 'free', 1: 'free', 2: 'free', 3: 'free', 4: 'free', 5: 'free', 6: 'free',
+                                     7: 'free', 8: 'free', 9: 'free', 10: 'free', 11: 'free', 12: 'free',
+                                     13: 'free', 14: 'free', 15: 'free'}}
         self.generate_arms()
 
     def generate_arms(self):
         for i, attr in enumerate(self.arms_meta_data.keys()):
             arms_meta_data = self.arms_meta_data[attr]
             limit_switch_pins = self.assign_pins(arms_meta_data['limit_switches'], 'digital', attr)
-            hdrm_pins = self.assign_pins(arms_meta_data['hdrms'], 'digital', attr)
             motor_pins = self.assign_pins(arms_meta_data['motor'], 'digital', attr)
+            relay_pins = self.assign_pins(arms_meta_data['relays'], 'relay', attr)
             strain_gage_pins = self.assign_pins(arms_meta_data['strain_gages'], 'analog', attr)
             thermistor_pins = self.assign_pins(arms_meta_data['thermistors'], 'analog', attr)
             print(f'Generating {attr}')
@@ -243,7 +287,7 @@ class EGSE:
                 strain_gage_transform_function=0,
                 thermistors_kwargs=thermistor_pins,
                 thermistor_transform_function=0,
-                hdrm_pin_kwargs=hdrm_pins)
+                relays_kwargs=relay_pins)
 
     def assign_pins(self, clients, pin_type, arm_name):
         for client in clients:
@@ -253,6 +297,14 @@ class EGSE:
                         clients[client]["pin"]] = f'{arm_name} - {client}'
                 else:
                     self.occupied_pin(f'Analog pin #{clients[client]["pin"]} on arduino #{clients[client]["arduino"]}',
+                                      f'{arm_name} - {client}')
+
+            if pin_type == 'relay':
+                if self.relay_pins[f'mcp_{clients[client]["mcp"]}'][clients[client]["pin"]] == 'free':
+                    self.relay_pins[f'mcp_{clients[client]["mcp"]}'][
+                        clients[client]["pin"]] = f'{arm_name} - {client}'
+                else:
+                    self.occupied_pin(f'MCP pin #{clients[client]["pin"]} on MCP #{clients[client]["mcp"]}',
                                       f'{arm_name} - {client}')
 
             if pin_type == 'digital':
@@ -269,55 +321,99 @@ class EGSE:
         exit()
 
 
-egse = EGSE({'arm1': {"arduino": 0,
-                      "limit_switches": {'limit_switch_1': 3, 'limit_switch_2': 5, 'limit_switch_3': 7},
-                      "hdrms": {'hdrm_1': 8},
-                      "motor": {'motor_direction': 10, 'motor_step': 11},
-                      "strain_gages": {'strain_gage_1': {'arduino': 0, 'pin': 0},
-                                       'strain_gage_2': {'arduino': 0, 'pin': 1},
-                                       'strain_gage_3': {'arduino': 0, 'pin': 2}},
-                      "thermistors": {'thermistor_1': {'arduino': 0, 'pin': 3},
-                                      'thermistor_2': {'arduino': 0, 'pin': 4},
-                                      'thermistor_3': {'arduino': 0, 'pin': 5}}},
+if __name__ == "__main__":
+    egse = EGSE({'arm1': {"arduino": 0,
+                          "limit_switches": {'limit_switch_1': 7, 'limit_switch_2': 10, 'limit_switch_3': 11},
+                          "motor": {'motor_direction': 12, 'motor_step': 13},
+                          "strain_gages": {'strain_gage_1': {'arduino': 0, 'pin': 0},
+                                           'strain_gage_2': {'arduino': 0, 'pin': 1}},
+                          "thermistors": {'thermistor_1': {'arduino': 0, 'pin': 2},
+                                          'thermistor_2': {'arduino': 0, 'pin': 3},
+                                          'thermistor_3': {'arduino': 0, 'pin': 4},
+                                          'thermistor_4': {'arduino': 0, 'pin': 5},
+                                          'motor_thermistor_1': {'arduino': 0, 'pin': 6},
+                                          'motor_thermistor_2': {'arduino': 0, 'pin': 7}},
+                          "relays": {'heater_thermistor_1': {'mcp': 0, 'pin': 0},
+                                     'heater_thermistor_2': {'mcp': 0, 'pin': 1},
+                                     'heater_thermistor_3': {'mcp': 0, 'pin': 2},
+                                     'heater_thermistor_4': {'mcp': 0, 'pin': 3},
+                                     'hdrm_1': {'mcp': 0, 'pin': 4},
+                                     'hdrm_2': {'mcp': 0, 'pin': 5}}},
+                 'arm2': {"arduino": 0,
+                          "limit_switches": {'limit_switch_1': 15, 'limit_switch_2': 16, 'limit_switch_3': 18},
+                          "motor": {'motor_direction': 19, 'motor_step': 21},
+                          "strain_gages": {'strain_gage_1': {'arduino': 0, 'pin': 8},
+                                           'strain_gage_2': {'arduino': 0, 'pin': 9}},
+                          "thermistors": {'thermistor_1': {'arduino': 0, 'pin': 10},
+                                          'thermistor_2': {'arduino': 0, 'pin': 11},
+                                          'thermistor_3': {'arduino': 0, 'pin': 12},
+                                          'thermistor_4': {'arduino': 0, 'pin': 13},
+                                          'motor_thermistor_1': {'arduino': 0, 'pin': 14},
+                                          'motor_thermistor_2': {'arduino': 0, 'pin': 15}},
+                          "relays": {'heater_thermistor_1': {'mcp': 0, 'pin': 6},
+                                     'heater_thermistor_2': {'mcp': 0, 'pin': 7},
+                                     'heater_thermistor_3': {'mcp': 0, 'pin': 8},
+                                     'heater_thermistor_4': {'mcp': 0, 'pin': 9},
+                                     'hdrm_1': {'mcp': 0, 'pin': 10},
+                                     'hdrm_2': {'mcp': 0, 'pin': 11}}},
+                 'arm3': {"arduino": 1,
+                          "limit_switches": {'limit_switch_1': 22, 'limit_switch_2': 23, 'limit_switch_3': 24},
+                          "motor": {'motor_direction': 26, 'motor_step': 27},
+                          "strain_gages": {'strain_gage_1': {'arduino': 1, 'pin': 0},
+                                           'strain_gage_2': {'arduino': 1, 'pin': 1}},
+                          "thermistors": {'thermistor_1': {'arduino': 1, 'pin': 2},
+                                          'thermistor_2': {'arduino': 1, 'pin': 3},
+                                          'thermistor_3': {'arduino': 1, 'pin': 4},
+                                          'thermistor_4': {'arduino': 1, 'pin': 5},
+                                          'motor_thermistor_1': {'arduino': 1, 'pin': 6},
+                                          'motor_thermistor_2': {'arduino': 1, 'pin': 7}},
+                          "relays": {'heater_thermistor_1': {'mcp': 1, 'pin': 0},
+                                     'heater_thermistor_2': {'mcp': 1, 'pin': 1},
+                                     'heater_thermistor_3': {'mcp': 1, 'pin': 2},
+                                     'heater_thermistor_4': {'mcp': 1, 'pin': 3},
+                                     'hdrm_1': {'mcp': 1, 'pin': 4},
+                                     'hdrm_2': {'mcp': 1, 'pin': 5}}},
+                 'arm4': {"arduino": 1,
+                          "limit_switches": {'limit_switch_1': 28, 'limit_switch_2': 29, 'limit_switch_3': 31},
+                          "motor": {'motor_direction': 32, 'motor_step': 33},
+                          "strain_gages": {'strain_gage_1': {'arduino': 1, 'pin': 8},
+                                           'strain_gage_2': {'arduino': 1, 'pin': 9}},
+                          "thermistors": {'thermistor_1': {'arduino': 1, 'pin': 10},
+                                          'thermistor_2': {'arduino': 1, 'pin': 11},
+                                          'thermistor_3': {'arduino': 1, 'pin': 12},
+                                          'thermistor_4': {'arduino': 1, 'pin': 13},
+                                          'motor_thermistor_1': {'arduino': 1, 'pin': 14},
+                                          'motor_thermistor_2': {'arduino': 1, 'pin': 15}},
+                          "relays": {'heater_thermistor_1': {'mcp': 1, 'pin': 6},
+                                     'heater_thermistor_2': {'mcp': 1, 'pin': 7},
+                                     'heater_thermistor_3': {'mcp': 1, 'pin': 8},
+                                     'heater_thermistor_4': {'mcp': 1, 'pin': 9},
+                                     'hdrm_1': {'mcp': 1, 'pin': 10},
+                                     'hdrm_2': {'mcp': 1, 'pin': 11}}}
+                 })
 
-             'arm2': {"arduino": 0,
-                      "limit_switches": {'limit_switch_1': 12, 'limit_switch_2': 13, 'limit_switch_3': 15},
-                      "hdrms": {'hdrm_1': 16},
-                      "motor": {'motor_direction': 18, 'motor_step': 19},
-                      "strain_gages": {'strain_gage_1': {'arduino': 0, 'pin': 6},
-                                       'strain_gage_2': {'arduino': 0, 'pin': 7},
-                                       'strain_gage_3': {'arduino': 0, 'pin': 8}},
-                      "thermistors": {'thermistor_1': {'arduino': 0, 'pin': 9},
-                                      'thermistor_2': {'arduino': 0, 'pin': 10},
-                                      'thermistor_3': {'arduino': 0, 'pin': 11}}},
-
-             'arm3': {"arduino": 1,
-                      "limit_switches": {'limit_switch_1': 21, 'limit_switch_2': 22, 'limit_switch_3': 23},
-                      "hdrms": {'hdrm_1': 24},
-                      "motor": {'motor_direction': 26, 'motor_step': 27},
-                      "strain_gages": {'strain_gage_1': {'arduino': 1, 'pin': 0},
-                                       'strain_gage_2': {'arduino': 1, 'pin': 1},
-                                       'strain_gage_3': {'arduino': 1, 'pin': 2}},
-                      "thermistors": {'thermistor_1': {'arduino': 1, 'pin': 3},
-                                      'thermistor_2': {'arduino': 1, 'pin': 4},
-                                      'thermistor_3': {'arduino': 1, 'pin': 5}}},
-
-             'arm4': {"arduino": 1,
-                      "limit_switches": {'limit_switch_1': 28, 'limit_switch_2': 29, 'limit_switch_3': 31},
-                      "hdrms": {'hdrm_1': 32},
-                      "motor": {'motor_direction': 33, 'motor_step': 35},
-                      "strain_gages": {'strain_gage_1': {'arduino': 1, 'pin': 6},
-                                       'strain_gage_2': {'arduino': 1, 'pin': 7},
-                                       'strain_gage_3': {'arduino': 1, 'pin': 8}},
-                      "thermistors": {'thermistor_1': {'arduino': 1, 'pin': 9},
-                                      'thermistor_2': {'arduino': 1, 'pin': 10},
-                                      'thermistor_3': {'arduino': 1, 'pin': 11}}},
-             })
-arm1_state = egse.arm1.get_arm_state()
-for sensor_group in arm1_state:
-    print(f'\n{sensor_group}:')
-    for sensor in arm1_state[sensor_group]:
-        space = [' ' for i in range(len(sensor_group) + 2)]
-        print(f'{"".join(space)}{sensor}: {arm1_state[sensor_group][sensor]}')
-
-print('1')
+    loop_frequency = 20
+    loop_frequency = 1 / loop_frequency
+    for _ in range(10000000):
+        start_time = time.monotonic()
+        arm_states = {1: egse.arm1.get_arm_state(),
+                      2: egse.arm2.get_arm_state(),
+                      3: egse.arm3.get_arm_state(),
+                      4: egse.arm4.get_arm_state()}
+        for arm_state in arm_states:
+            print('\n\n############################################################################')
+            print(f'#                                  Arm #{arm_state}                                  #')
+            print('############################################################################')
+            arm = arm_states[arm_state]
+            for sensor_group in arm:
+                print(f'\n{sensor_group}:')
+                for sensor in arm[sensor_group]:
+                    space = [' ' for i in range(len(sensor_group) + 2)]
+                    print(f'{"".join(space)}{sensor}: {arm[sensor_group][sensor]}')
+        # end_time = time.monotonic()
+        # time_taken = end_time - start_time
+        #
+        # # Wait until the next iteration time
+        # if time_taken < loop_frequency:
+        #     time.sleep(loop_frequency - time_taken)
+    print('1')
