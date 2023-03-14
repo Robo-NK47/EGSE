@@ -1,4 +1,5 @@
 import serial
+import time
 
 
 def check_which_port():
@@ -47,16 +48,25 @@ def get_all_analog_values(arduino, _header_value):
 
 def generate_arduinos(baud_rate=115200, header_value=1024):
     _arduinos = {}
-    for i, arduino_port in enumerate(get_arduino_ports()):
-        _arduinos[f'arduino {i}'] = serial.Serial(arduino_port, baud_rate)
+    try:
+        for i, arduino_port in enumerate(get_arduino_ports()):
+            _arduinos[f'arduino {i}'] = serial.Serial(arduino_port, baud_rate)
 
-    return _arduinos, header_value
+        return _arduinos, header_value
+    except TypeError:
+        exit('No Arduino found.')
 
 
-if __name__ == "main":
+def temperature_conversion(x):
+    return -0.0011574768 * x ** 2 + 1.3435908001 * x - 360.81
+
+
+if __name__ == "__main__":
     arduinos, header = generate_arduinos()
+
     while True:
-        for arduino in arduinos:
-            value = get_all_analog_values(arduinos[arduino], header)
-            print(f'{arduino} - {value}')
-        print("")
+        temp = []
+        for _ in range(100):
+            temp.append(temperature_conversion(get_all_analog_values(arduinos['arduino 0'], header)[2]))
+        avg = sum(temp) / len(temp)
+        print(f'{avg:.1f}')

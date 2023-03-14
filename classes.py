@@ -3,6 +3,9 @@ import time
 import arduino_methods_USB
 from tqdm.auto import tqdm
 from pcf8575 import PCF8575
+import pandas as pd
+import threading
+import os
 
 
 def setup_mcp(pcf_address):
@@ -22,14 +25,14 @@ mcps = {0: setup_mcp(0x20), 1: setup_mcp(0x21)}
 
 
 class Motor:
-    def __init__(self, motor_name, direction_pin, step_pin, limit_switches, direction, step_resolution):
+    def __init__(self, name, direction_pin, step_pin, limit_switches, direction, step_resolution):
         self.directions = {'open': 1, 'close': 0}
         self.velocity = 0
         self.current_position = 0
         self.step_counter = 0
         self.stop = 0  # a condition triggered by the limit switch
 
-        self.motor_name = motor_name
+        self.name = name
         self.direction_pin = direction_pin
         self.step_pin = step_pin
         self.step_resolution = step_resolution
@@ -99,7 +102,7 @@ class Motor:
 
     def get_values(self):
         # This function returns all the motor's attributes
-        return {'motor_name': self.motor_name,
+        return {'motor_name': self.name,
                 'step_resolution': self.step_resolution,
                 'direction_pin': self.direction_pin,
                 'step_pin': self.step_pin,
@@ -127,21 +130,24 @@ class Motor:
 
 
 class AnalogSensor:
-    def __init__(self, sensor_type, arduino_address, transform_function):
+    def __init__(self, sensor_type, arduino_address, transform_function, analog_sensor_name):
+        self.name = analog_sensor_name
         self.sensor_type = sensor_type
         self.arduino_address = arduino_address
         self.transform_function = transform_function
+        self.state = 0
 
     def transform(self, analog_data):
-        # return self.transform_function(analog_data)
-        return analog_data
+        return self.transform_function(analog_data)
 
     def read_sensor(self, analog_data):
-        return self.transform(analog_data[self.arduino_address['pin']])
+        self.state = self.transform(analog_data[self.arduino_address['pin']])
+        return self.state
 
 
 class DigitalSensor:
-    def __init__(self, sensor_pin):
+    def __init__(self, sensor_pin, digital_sensor_name):
+        self.name = digital_sensor_name
         self.sensor_pin = sensor_pin
         self.sensor_setup()
         self.state = self.check_state()
@@ -155,17 +161,18 @@ class DigitalSensor:
 
 
 class Relay:
-    def __init__(self, mcp_pin, mcp_number):
+    def __init__(self, mcp_pin, mcp_number, relay_name):
+        self.name = relay_name
         self.mcp_pin = mcp_pin
         self.mcp_number = mcp_number
         self.state = self.check_state()
 
     def change_state(self, new_state):
-        mcps[self.mcp_number].port[self.mcp_pin] = new_state
-        return self.state
+        mcps[self.mcp_number].port[15 - self.mcp_pin] = new_state
+        self.state = self.check_state()
 
     def check_state(self):
-        self.state = mcps[self.mcp_number].port[self.mcp_pin]
+        self.state = mcps[self.mcp_number].port[15 - self.mcp_pin]
         return self.state
 
 
@@ -177,7 +184,7 @@ class AnalogSensorsGroup:
         self.sensor_type = sensor_type
         for attr in kwargs.keys():
             self.__dict__[attr] = AnalogSensor(sensor_type=self.sensor_type, arduino_address=kwargs[attr],
-                                               transform_function=self.transform_function)
+                                               transform_function=self.transform_function, analog_sensor_name=attr)
 
     def get_values(self, arduino_data):
         states = {}
@@ -192,7 +199,7 @@ class DigitalSensorsGroup:
         self.sensor_names = list(kwargs.keys())
         self.sensor_type = sensor_type
         for attr in kwargs.keys():
-            self.__dict__[attr] = DigitalSensor(sensor_pin=kwargs[attr])
+            self.__dict__[attr] = DigitalSensor(sensor_pin=kwargs[attr], digital_sensor_name=attr)
 
     def get_values(self):
         states = {}
@@ -206,7 +213,7 @@ class RelayGroup:
         self.number_of_relays = len(kwargs.keys())
         self.relay_names = list(kwargs.keys())
         for attr in kwargs.keys():
-            self.__dict__[attr] = Relay(mcp_pin=kwargs[attr]['pin'], mcp_number=kwargs[attr]['mcp'])
+            self.__dict__[attr] = Relay(mcp_pin=kwargs[attr]['pin'], mcp_number=kwargs[attr]['mcp'], relay_name=attr)
 
     def get_values(self):
         states = {}
@@ -219,9 +226,10 @@ class Arm:
     def __init__(self, limit_switches_kwargs, motor_name, motor_direction_pin,
                  motor_step_pin, motor_direction, motor_step_resolution, strain_gages_kwargs,
                  strain_gage_transform_function, thermistors_kwargs,
-                 thermistor_transform_function, relays_kwargs, arduino):
+                 thermistor_transform_function, relays_kwargs, arduino, arm_name):
+        self.name = arm_name
         self.limit_switches = DigitalSensorsGroup(sensor_type='limit switch', **limit_switches_kwargs)
-        self.motor = Motor(motor_name=motor_name, direction_pin=motor_direction_pin, step_pin=motor_step_pin,
+        self.motor = Motor(name=motor_name, direction_pin=motor_direction_pin, step_pin=motor_step_pin,
                            limit_switches=self.limit_switches, direction=motor_direction,
                            step_resolution=motor_step_resolution)
         self.strain_gages = AnalogSensorsGroup(sensor_type='strain_gages',
@@ -243,6 +251,17 @@ class Arm:
 
     def get_analog_data(self):
         return arduino_methods_USB.get_all_analog_values(arduinos[f'arduino {self.arduino}'], header)
+
+    def flatten_incoming_data(self):
+        incoming_data = self.get_arm_state()
+        flattened_data = {}
+
+        flattened_data.update(incoming_data['limit_switches'])
+        flattened_data.update(incoming_data['strain_gages'])
+        flattened_data.update(incoming_data['thermistors'])
+        flattened_data.update(incoming_data['relays'])
+        flattened_data[incoming_data['motor']['motor_name']] = incoming_data['motor']['current_position']
+        return flattened_data
 
 
 class EGSE:
@@ -284,10 +303,11 @@ class EGSE:
                 motor_direction='open',
                 motor_step_resolution=0.05,
                 strain_gages_kwargs=strain_gage_pins,
-                strain_gage_transform_function=0,
+                strain_gage_transform_function=lambda x: x,
                 thermistors_kwargs=thermistor_pins,
-                thermistor_transform_function=0,
-                relays_kwargs=relay_pins)
+                thermistor_transform_function=lambda x: -0.0011574768 * x ** 2 + 1.3435908001 * x - 360.81,
+                relays_kwargs=relay_pins,
+                arm_name=f'arm {i}')
 
     def assign_pins(self, clients, pin_type, arm_name):
         for client in clients:
@@ -319,6 +339,44 @@ class EGSE:
         a = self.analog_pins
         print(f"{pin_to_assign} is already in use, can't assign to {client_to_assign}, the program will shut down.")
         exit()
+
+    def flattened_data_frame(self):
+        flattened_data = {'time_frame': time.time()}
+        for attr in self.__dict__:
+            if 'arm' in attr and 'meta' not in attr:
+                arm_dict = {}
+                arm_data = self.__dict__[attr].flatten_incoming_data()
+                for feature in arm_data:
+                    arm_dict[f'{attr}_{feature}'] = arm_data[feature]
+
+                flattened_data.update(arm_dict)
+        return flattened_data
+
+    def get_meta_data(self):
+        return self.arms_meta_data
+
+
+def add_dict_to_dataframe(df, dict_data):
+    new_row = pd.DataFrame(dict_data, index=[0])
+    df = pd.concat([df, new_row], ignore_index=True)
+    return df
+
+
+def save_dataframe_to_csv(df, file_path):
+    df.to_csv(file_path, index=False)
+
+
+def generate_save_thread(data, file_path, chunk_number):
+    _path = f'{file_path}-{chunk_number}.csv'
+    save_thread = threading.Thread(target=save_dataframe_to_csv, args=(data, _path, ))
+    save_thread.start()
+    save_thread.join()
+
+
+def create_directory(path, directory_name):
+    directory_path = os.path.join(path, directory_name)
+    if not os.path.exists(directory_path):
+        os.mkdir(directory_path)
 
 
 if __name__ == "__main__":
@@ -392,28 +450,46 @@ if __name__ == "__main__":
                                      'hdrm_2': {'mcp': 1, 'pin': 11}}}
                  })
 
-    loop_frequency = 20
-    loop_frequency = 1 / loop_frequency
-    for _ in range(10000000):
-        start_time = time.monotonic()
-        arm_states = {1: egse.arm1.get_arm_state(),
-                      2: egse.arm2.get_arm_state(),
-                      3: egse.arm3.get_arm_state(),
-                      4: egse.arm4.get_arm_state()}
-        for arm_state in arm_states:
-            print('\n\n############################################################################')
-            print(f'#                                  Arm #{arm_state}                                  #')
-            print('############################################################################')
-            arm = arm_states[arm_state]
-            for sensor_group in arm:
-                print(f'\n{sensor_group}:')
-                for sensor in arm[sensor_group]:
-                    space = [' ' for i in range(len(sensor_group) + 2)]
-                    print(f'{"".join(space)}{sensor}: {arm[sensor_group][sensor]}')
-        # end_time = time.monotonic()
-        # time_taken = end_time - start_time
-        #
-        # # Wait until the next iteration time
-        # if time_taken < loop_frequency:
-        #     time.sleep(loop_frequency - time_taken)
-    print('1')
+    all_test_parameters = [{'freq': 20, 'save_batch': 5000}, {'freq': 30, 'save_batch': 1000},
+                       {'freq': 30, 'save_batch': 2000}, {'freq': 30, 'save_batch': 2500}]
+
+    for test_parameters in all_test_parameters:
+        print('\n\n\n')
+        print(test_parameters)
+        print('\n')
+        loop_frequency = test_parameters['freq']
+        loop_frequency = 1 / loop_frequency
+
+        _path = r'/home/astroscale/Python/EGSE/data_chunks/'
+        _directory_name = f"freq_{test_parameters['freq']}-save_batch" \
+                          f"-{test_parameters['save_batch']} "
+
+        create_directory(_path, _directory_name)
+
+        for p in range(int(20000/test_parameters['save_batch'])):
+            print(p)
+            for k in range(test_parameters['save_batch']):
+                start_time = time.monotonic()
+                egse.arm1.get_arm_state()
+                egse.arm2.get_arm_state()
+                egse.arm3.get_arm_state()
+                egse.arm4.get_arm_state()
+
+                single_time_frames = egse.flattened_data_frame()
+                if k == 0:
+                    all_frames = pd.DataFrame(single_time_frames, index=[0])
+                else:
+                    all_frames = add_dict_to_dataframe(all_frames, single_time_frames)
+
+                end_time = time.monotonic()
+                time_taken = end_time - start_time
+
+                # Wait until the next iteration time
+                if time_taken < loop_frequency:
+                    time.sleep(loop_frequency - time_taken)
+            dir_name = os.path.join(_path, _directory_name, f'data')
+            generate_save_thread(all_frames, dir_name, p)
+        print('\n\n################################################')
+        print('###################   DONE   ###################')
+        print('################################################')
+        time.sleep(1)
